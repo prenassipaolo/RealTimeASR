@@ -1,15 +1,20 @@
+import logging
 import collections
 import queue
 from wav2vec2_inference import Wave2Vec2Inference
 import numpy as np
 import pyaudio
+import wave
 import webrtcvad
 from halo import Halo
+from scipy import signal
 import torch
 import torchaudio
 from rx.subject import BehaviorSubject
 import time
 from sys import exit
+
+logging.basicConfig(level=20)
 
 class Audio(object):
     """Streams raw audio from microphone. Data is received in a separate thread, and stored in a buffer, to be read from."""
@@ -20,21 +25,21 @@ class Audio(object):
     CHANNELS = 1
     BLOCKS_PER_SECOND = 50
 
-    def __init__(self, callback=None, device=None, input_rate=RATE_PROCESS):
+    def __init__(self, callback=None, device=None, input_rate=RATE_PROCESS, file=None):
         def proxy_callback(in_data, frame_count, time_info, status):
-            #pylint: disable=unused-argument
+            # when audio file is used, read it
+            if self.chunk is not None:
+                in_data = self.wf.readframes(self.chunk)
             callback(in_data)
             return (None, pyaudio.paContinue)
-        if callback is None:
-            def callback(in_data): return self.buffer_queue.put(in_data)
+        if callback is None: callback = lambda in_data: self.buffer_queue.put(in_data)
         self.buffer_queue = queue.Queue()
         self.device = device
         self.input_rate = input_rate
         self.sample_rate = self.RATE_PROCESS
-        self.block_size = int(self.RATE_PROCESS /
-                              float(self.BLOCKS_PER_SECOND))
-        self.block_size_input = int(
-            self.input_rate / float(self.BLOCKS_PER_SECOND))
+        self.block_size = int(self.RATE_PROCESS / float(self.BLOCKS_PER_SECOND))
+        self.block_size_input = int(self.input_rate / float(self.BLOCKS_PER_SECOND))
+        self.frame_duration_ms = 1000 * self.block_size // self.sample_rate
         self.pa = pyaudio.PyAudio()
 
         kwargs = {
@@ -47,24 +52,60 @@ class Audio(object):
         }
 
         self.chunk = None
+        # Change parameters if device is not None or the audio source is a file
         # if not default device
         if self.device:
             kwargs['input_device_index'] = self.device
+        # open audio file
+        elif file is not None:
+            self.chunk = 320
+            self.wf = wave.open(file, 'rb')
 
+        # initialize stream
         self.stream = self.pa.open(**kwargs)
         self.stream.start_stream()
 
+    def resample(self, data):
+        """
+        Microphone may not support our native processing sampling rate, so
+        resample from input_rate to RATE_PROCESS here for webrtcvad and
+        the chosen asr model
+        Args:
+            data (binary): Input audio stream
+        Return:
+            (bytes): Resampled data in bytes form
+        """
+        data16 = np.fromstring(string=data, dtype=np.int16)
+        resample_size = int(len(data16) / self.input_rate * self.RATE_PROCESS)
+        resample = signal.resample(data16, resample_size)
+        resample16 = np.array(resample, dtype=np.int16)
+        return resample16.tobytes()
+
+    def read_resampled(self):
+        """Return a block of audio data resampled to 16000hz, blocking if necessary."""
+        return self.resample(data=self.buffer_queue.get(),
+                             input_rate=self.input_rate)
+    
     def read(self):
         """Return a block of audio data, blocking if necessary."""
         return self.buffer_queue.get()
 
     def destroy(self):
+        # close the stream
         self.stream.stop_stream()
         self.stream.close()
         self.pa.terminate()
-
-    frame_duration_ms = property(
-        lambda self: 1000 * self.block_size // self.sample_rate)
+    
+    def write_wav(self, filename, data):
+        logging.info("write wav %s", filename)
+        wf = wave.open(filename, 'wb')
+        wf.setnchannels(self.CHANNELS)
+        # wf.setsampwidth(self.pa.get_sample_size(FORMAT))
+        assert self.FORMAT == pyaudio.paInt16
+        wf.setsampwidth(2)
+        wf.setframerate(self.sample_rate)
+        wf.writeframes(data)
+        wf.close()
 
 
 class VADAudio(Audio):
@@ -80,7 +121,10 @@ class VADAudio(Audio):
             while True:
                 yield self.read()
         else:
-            raise Exception("Resampling required")
+            # if you want to impose resampling before the process to increase the program speed, uncomment the following line
+            # raise Exception("Resampling required")
+            while True:
+                yield self.read_resampled()
 
     def vad_collector(self, padding_ms=300, ratio=0.75, frames=None):
         """Generator that yields series of consecutive audio frames comprising each utterence, separated by yielding a single None.
@@ -121,8 +165,12 @@ class VADAudio(Audio):
 
 
 def main(ARGS):
+    
+    
+    
+    print('Initializing model...')
     model_name = "jonatasgrosman/wav2vec2-large-xlsr-53-italian"
-
+    logging.info("ASR model: %s", model_name)
     wave_buffer = BehaviorSubject(np.array([]))
     wave2vec_asr = Wave2Vec2Inference(model_name)
     wave_buffer.subscribe(
@@ -140,7 +188,7 @@ def main(ARGS):
     # load silero VAD
     torchaudio.set_audio_backend("soundfile")
     model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
-                                  model=ARGS.silaro_model_name,
+                                  model=ARGS.silero_model_name,
                                   force_reload=ARGS.reload,
                                   onnx=True)
     (get_speech_timestamps,save_audio,read_audio,VADIterator,collect_chunks) = utils
@@ -207,33 +255,19 @@ if __name__ == '__main__':
 
     parser.add_argument('-v', '--webRTC_aggressiveness', type=int, default=3,
                         help="Set aggressiveness of webRTC: an integer between 0 and 3, 0 being the least aggressive about filtering out non-speech, 3 the most aggressive. Default: 3")
+    
     parser.add_argument('--nospinner', action='store_true',
                         help="Disable spinner")
+    
     parser.add_argument('-d', '--device', type=int, default=None,
                         help="Device input index (Int) as listed by pyaudio.PyAudio.get_device_info_by_index(). If not provided, falls back to PyAudio.get_default_device().")
 
-    parser.add_argument('-name', '--silaro_model_name', type=str, default="silero_vad",
+    parser.add_argument('-name', '--silero_model_name', type=str, default="silero_vad",
                         help="select the name of the model. You can select between 'silero_vad',''silero_vad_micro','silero_vad_micro_8k','silero_vad_mini','silero_vad_mini_8k'")
+    
     parser.add_argument('--reload', action='store_true',
                         help="download the last version of the silero vad")
-
-    parser.add_argument('-ts', '--trig_sum', type=float, default=0.25,
-                        help="overlapping windows are used for each audio chunk, trig sum defines average probability among those windows for switching into triggered state (speech state)")
-
-    parser.add_argument('-nts', '--neg_trig_sum', type=float, default=0.07,
-                        help="same as trig_sum, but for switching from triggered to non-triggered state (non-speech)")
-
-    parser.add_argument('-N', '--num_steps', type=int, default=8,
-                        help="nubmer of overlapping windows to split audio chunk into (we recommend 4 or 8)")
-
-    parser.add_argument('-nspw', '--num_samples_per_window', type=int, default=4000,
-                        help="number of samples in each window, our models were trained using 4000 samples (250 ms) per window, so this is preferable value (lesser values reduce quality)")
-
-    parser.add_argument('-msps', '--min_speech_samples', type=int, default=10000,
-                        help="minimum speech chunk duration in samples")
-
-    parser.add_argument('-msis', '--min_silence_samples', type=int, default=500,
-                        help=" minimum silence duration in samples between to separate speech chunks")
+                        
     ARGS = parser.parse_args()
     ARGS.rate = DEFAULT_SAMPLE_RATE
     main(ARGS)
