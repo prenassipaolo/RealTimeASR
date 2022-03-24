@@ -1,6 +1,7 @@
 import logging
 import collections
 import queue
+import os
 from wav2vec2_inference import Wave2Vec2Inference
 import numpy as np
 import pyaudio
@@ -23,7 +24,7 @@ class Audio(object):
     # Network/VAD rate-space
     RATE_PROCESS = 16000
     CHANNELS = 1
-    BLOCKS_PER_SECOND = 50
+    BLOCKS_PER_SECOND = 20 
 
     def __init__(self, callback=None, device=None, input_rate=RATE_PROCESS, file=None):
         def proxy_callback(in_data, frame_count, time_info, status):
@@ -58,7 +59,7 @@ class Audio(object):
             kwargs['input_device_index'] = self.device
         # open audio file
         elif file is not None:
-            self.chunk = 320
+            self.chunk = self.block_size_input
             self.wf = wave.open(file, 'rb')
 
         # initialize stream
@@ -111,9 +112,12 @@ class Audio(object):
 class VADAudio(Audio):
     """Filter & segment audio with voice activity detection."""
 
-    def __init__(self, aggressiveness=3, device=None, input_rate=None):
+    def __init__(self, vad_model, input_rate, prob_threshold=0.5, device=None):# TO REMOVE ): # TO REMOVE aggressiveness=3
         super().__init__(device=device, input_rate=input_rate)
-        self.vad = webrtcvad.Vad(aggressiveness)
+        # TO REMOVE
+        # self.vad = webrtcvad.Vad(aggressiveness)
+        self.vad_model = vad_model
+        self.prob_threshold = prob_threshold
 
     def frame_generator(self):
         """Generator that yields all audio frames from microphone."""
@@ -139,10 +143,15 @@ class VADAudio(Audio):
         triggered = False
 
         for frame in frames:
-            if len(frame) < 640:
+            if len(frame) < self.block_size_input*2: # TO REMOVE 640
                 return
 
-            is_speech = self.vad.is_speech(frame, self.sample_rate)
+            # TO REMOVE
+            # is_speech = self.vad.is_speech(frame, self.sample_rate)
+            newsound = np.frombuffer(frame, np.int16)
+            audio_float32 = Int2FloatSimple(newsound)
+            speech_prob = self.vad_model(audio_float32, self.sample_rate).item()
+            is_speech = speech_prob >= self.prob_threshold
 
             if not triggered:
                 ring_buffer.append((frame, is_speech))
@@ -176,13 +185,16 @@ def main(ARGS):
     wave_buffer.subscribe(
         on_next=lambda x: asr_output_formatter(wave2vec_asr, x))
 
+    # TO REMOVE
+    """
     # Start audio with VAD
     vad_audio = VADAudio(aggressiveness=ARGS.webRTC_aggressiveness,
                          device=ARGS.device,
                          input_rate=ARGS.rate)
+    """
+    
 
-    print("Listening (ctrl-C to exit)...")
-    frames = vad_audio.vad_collector()
+    
     
 
     # load silero VAD
@@ -191,7 +203,15 @@ def main(ARGS):
                                   model=ARGS.silero_model_name,
                                   force_reload=ARGS.reload,
                                   onnx=True)
-    (get_speech_timestamps,save_audio,read_audio,VADIterator,collect_chunks) = utils
+
+    
+
+    (get_speech_timestamps, save_audio, read_audio, VADIterator, collect_chunks) = utils
+
+    vad_audio = VADAudio(vad_model=model, input_rate=ARGS.rate) #, input_rate = 16000)
+    
+    print("Listening (ctrl-C to exit)...")
+    frames = vad_audio.vad_collector()
 
     # Stream from microphone to Wav2Vec 2.0 using VAD
     print("audio length\tinference time\ttext")    
@@ -199,30 +219,28 @@ def main(ARGS):
     if not ARGS.nospinner:
         spinner = Halo(spinner='line')
     wav_data = bytearray()
-    try:
-        for frame in frames:
-            if frame is not None:
-                if spinner:
-                    spinner.start()
+    for frame in frames:
+        if frame is not None:
+            if spinner:
+                spinner.start()
 
-                wav_data.extend(frame)
+            wav_data.extend(frame)
+        else:
+            if spinner:
+                spinner.stop()
+            #print("webRTC has detected a possible speech")
+
+            newsound = np.frombuffer(wav_data, np.int16)
+            audio_float32 = Int2FloatSimple(newsound)
+            time_stamps = get_speech_timestamps(audio_float32, model, sampling_rate=ARGS.rate)
+
+            if(len(time_stamps) > 0):
+                #print("silero VAD has detected a possible speech")              
+                wave_buffer.on_next(audio_float32.numpy())
             else:
-                if spinner:
-                    spinner.stop()
-                #print("webRTC has detected a possible speech")
+                print("VAD detected noise")
+            wav_data = bytearray()
 
-                newsound = np.frombuffer(wav_data, np.int16)
-                audio_float32 = Int2FloatSimple(newsound)
-                time_stamps = get_speech_timestamps(audio_float32, model, sampling_rate=ARGS.rate)
-
-                if(len(time_stamps) > 0):
-                    #print("silero VAD has detected a possible speech")              
-                    wave_buffer.on_next(audio_float32.numpy())
-                else:
-                    print("VAD detected noise")
-                wav_data = bytearray()
-    except KeyboardInterrupt:        
-        exit()
 
 
 def asr_output_formatter(asr, audio):
@@ -267,7 +285,22 @@ if __name__ == '__main__':
     
     parser.add_argument('--reload', action='store_true',
                         help="download the last version of the silero vad")
+    
+    parser.add_argument('-r', '--rate', type=int, default=DEFAULT_SAMPLE_RATE,
+                        help=f"Input device sample rate. Default: {DEFAULT_SAMPLE_RATE}. Your device may require 44100.")
+    
+    parser.add_argument('-w', '--savewav',
+                        help="Save .wav files of utterences to given directory")
                         
     ARGS = parser.parse_args()
-    ARGS.rate = DEFAULT_SAMPLE_RATE
+    if ARGS.savewav: os.makedirs(ARGS.savewav, exist_ok=True)
     main(ARGS)
+
+"""
+TO DO
+
+- add save_wav function
+- undestand ring_buffer and frames management
+- add previous frame to avoid first word truncation -> VADIterator: https://github.com/snakers4/silero-vad/blob/master/hubconf.py
+
+"""
