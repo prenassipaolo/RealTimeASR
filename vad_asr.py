@@ -2,6 +2,7 @@ import logging
 import collections
 import queue
 import os
+from datetime import datetime
 from wav2vec2_inference import Wave2Vec2Inference
 import numpy as np
 import pyaudio
@@ -98,7 +99,7 @@ class Audio(object):
         self.pa.terminate()
     
     def write_wav(self, filename, data):
-        logging.info("write wav %s", filename)
+        #logging.info("write wav %s", filename)
         wf = wave.open(filename, 'wb')
         wf.setnchannels(self.CHANNELS)
         # wf.setsampwidth(self.pa.get_sample_size(FORMAT))
@@ -174,12 +175,11 @@ class VADAudio(Audio):
 
 
 def main(ARGS):
-    
-    
-    
-    print('Initializing model...')
+
     model_name = "jonatasgrosman/wav2vec2-large-xlsr-53-italian"
-    logging.info("ASR model: %s", model_name)
+    print("ASR model in use: ", model_name)
+    print('Initializing model...')
+    #logging.info("ASR model: %s", model_name)
     wave_buffer = BehaviorSubject(np.array([]))
     wave2vec_asr = Wave2Vec2Inference(model_name)
     wave_buffer.subscribe(
@@ -192,10 +192,6 @@ def main(ARGS):
                          device=ARGS.device,
                          input_rate=ARGS.rate)
     """
-    
-
-    
-    
 
     # load silero VAD
     torchaudio.set_audio_backend("soundfile")
@@ -204,11 +200,10 @@ def main(ARGS):
                                   force_reload=ARGS.reload,
                                   onnx=True)
 
-    
-
     (get_speech_timestamps, save_audio, read_audio, VADIterator, collect_chunks) = utils
 
-    vad_audio = VADAudio(vad_model=model, input_rate=ARGS.rate) #, input_rate = 16000)
+    vad_audio = VADAudio(vad_model=model,
+                        input_rate=ARGS.rate) #, input_rate = 16000)
     
     print("Listening (ctrl-C to exit)...")
     frames = vad_audio.vad_collector()
@@ -223,14 +218,17 @@ def main(ARGS):
         if frame is not None:
             if spinner:
                 spinner.start()
-
             wav_data.extend(frame)
         else:
             if spinner:
                 spinner.stop()
             #print("webRTC has detected a possible speech")
-
             newsound = np.frombuffer(wav_data, np.int16)
+            if ARGS.savewav:
+                vad_audio.write_wav(os.path.join(ARGS.savewav,
+                                                datetime.now().strftime("savewav_%Y-%m-%d_%H-%M-%S_%f.wav")),
+                                                wav_data)
+                wav_data = bytearray()
             audio_float32 = Int2FloatSimple(newsound)
             time_stamps = get_speech_timestamps(audio_float32, model, sampling_rate=ARGS.rate)
 
@@ -289,9 +287,9 @@ if __name__ == '__main__':
     parser.add_argument('-r', '--rate', type=int, default=DEFAULT_SAMPLE_RATE,
                         help=f"Input device sample rate. Default: {DEFAULT_SAMPLE_RATE}. Your device may require 44100.")
     
-    parser.add_argument('-w', '--savewav',
+    parser.add_argument('-w', '--savewav', default="./wavfiles/", action='store_false',
                         help="Save .wav files of utterences to given directory")
-                        
+
     ARGS = parser.parse_args()
     if ARGS.savewav: os.makedirs(ARGS.savewav, exist_ok=True)
     main(ARGS)
@@ -299,7 +297,6 @@ if __name__ == '__main__':
 """
 TO DO
 
-- add save_wav function
 - undestand ring_buffer and frames management
 - add previous frame to avoid first word truncation -> VADIterator: https://github.com/snakers4/silero-vad/blob/master/hubconf.py
 
