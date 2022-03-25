@@ -287,8 +287,7 @@ if __name__ == '__main__':
     parser.add_argument('-r', '--rate', type=int, default=DEFAULT_SAMPLE_RATE,
                         help=f"Input device sample rate. Default: {DEFAULT_SAMPLE_RATE}. Your device may require 44100.")
     
-    parser.add_argument('-w', '--savewav', default="./wavfiles/", action='store_false',
-                        help="Save .wav files of utterences to given directory")
+    parser.add_argument('-w', '--savewav', default=None, help="Save .wav files of utterences to given directory")
 
     ARGS = parser.parse_args()
     if ARGS.savewav: os.makedirs(ARGS.savewav, exist_ok=True)
