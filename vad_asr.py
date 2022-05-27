@@ -28,13 +28,7 @@ class Audio(object):
     BLOCKS_PER_SECOND = 20 
 
     def __init__(self, callback=None, device=None, input_rate=RATE_PROCESS, file=None):
-        def proxy_callback(in_data, frame_count, time_info, status):
-            # when audio file is used, read it
-            if self.chunk is not None:
-                in_data = self.wf.readframes(self.chunk)
-            callback(in_data)
-            return (None, pyaudio.paContinue)
-        if callback is None: callback = lambda in_data: self.buffer_queue.put(in_data)
+
         self.buffer_queue = queue.Queue()
         self.device = device
         self.input_rate = input_rate
@@ -43,6 +37,16 @@ class Audio(object):
         self.block_size_input = int(self.input_rate / float(self.BLOCKS_PER_SECOND))
         self.frame_duration_ms = 1000 * self.block_size // self.sample_rate
         self.pa = pyaudio.PyAudio()
+
+        # function to put the data into the streaming queue
+        if callback is None: callback = lambda in_data: self.buffer_queue.put(in_data)
+        
+        def proxy_callback(in_data, frame_count, time_info, status): 
+            # when audio file is used, read it
+            if self.chunk is not None:
+                in_data = self.wf.readframes(self.chunk)
+            callback(in_data)
+            return (None, pyaudio.paContinue)
 
         kwargs = {
             'format': self.FORMAT,
@@ -298,5 +302,6 @@ TO DO
 
 - undestand ring_buffer and frames management
 - add previous frame to avoid first word truncation -> VADIterator: https://github.com/snakers4/silero-vad/blob/master/hubconf.py
+- import the model only in inference and not in main too
 
 """

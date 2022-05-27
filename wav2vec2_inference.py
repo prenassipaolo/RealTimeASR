@@ -21,8 +21,9 @@ class Wave2Vec2Inference():
         with torch.no_grad():
             logits = self.model(inputs.input_values).logits
 
-        predicted_ids = torch.argmax(logits, dim=-1)        
+        predicted_ids = torch.argmax(logits, dim=-1)    
         transcription = self.processor.batch_decode(predicted_ids)[0]
+        
         return transcription.lower()
 
     def file_to_text(self,filename):
