@@ -7,16 +7,15 @@ from wav2vec2_inference import Wave2Vec2Inference
 import numpy as np
 import pyaudio
 import wave
-#import webrtcvad
 from halo import Halo
 from scipy import signal
 import torch
 import torchaudio
 from rx.subject import BehaviorSubject
 import time
-#from sys import exit
 
 logging.basicConfig(level=20)
+
 
 class Audio(object):
     """Streams raw audio from microphone. Data is received in a separate thread, and stored in a buffer, to be read from."""
